@@ -79,7 +79,7 @@ def save_img():
         plt.savefig('images/%03i.png' % frame)
         frame += 1
 
-def same_imgs(model):
+def save_imgs(model):
     img_saver = save_img()
     next(img_saver)
 
