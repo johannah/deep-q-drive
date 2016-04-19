@@ -2,6 +2,8 @@
 import os
 from random import sample as rsample
 
+import sys
+sys.setrecursionlimit(40000)
 import numpy as np
 
 from keras.models import Sequential
@@ -10,39 +12,61 @@ from keras.layers.core import Dense, Flatten
 from keras.optimizers import SGD, RMSprop
 
 from matplotlib import pyplot as plt
+import argparse
+import pickle
 
 
-GRID_SIZE_X = 10
-GRID_SIZE_Y = 10
+def episode(grid_size_x, grid_size_y):
+    # always start boulder at 0
+    y = 0
+    car_wside = 1
+    car_length = 1
+    track_side = 3
+    x = np.random.randint(track_side-1, grid_size_x-track_side)
+    x = 6
+    xcar = x
+    score = 0
+    # create track array
+    X = np.ones((grid_size_x, grid_size_y))
+    road = list(range(x-track_side-1, x+track_side))
+    X[0:grid_size_y,road] = 0.0
 
-def episode():
-    """
-    Coroutine of episode.
-    Action has to be explicitly send to this coroutine.
-    """
-    x, y, z = (
-        np.random.randint(0, GRID_SIZE_X), 0,  # X,Y of boulder
-        np.random.randint(1, GRID_SIZE_X - 1)  # X of basket
-    )
+    die_color = 0.75
     while True:
-        X = np.zeros((GRID_SIZE_X, GRID_SIZE_Y))  # Reset grid
-        # Draw boulder
-        X[y, x] = 1.
-        bar = list(range(z - 1, z + 2))
-        X[-1, bar] = 1.  # Draw basket
 
-        # End of game is known when fruit is at second to last line of grid.
-        # End represents either a win or a loss
-        end = int(y >= GRID_SIZE_Y - 2)
-        if end and x not in bar:
-            end *= -1
+        # iterate to newest track
+        X = np.roll(X, 1, axis=0)
+        road = list(range(x-track_side-1, x+track_side))
+        # reset initial
+        X[0,:] = 1.0
+        X[0,road] = 0.0
+        # draw initialized car
+        if xcar < 0:
+            score = -1000
+            X[grid_size_y-1, 0] = die_color
+        elif xcar > grid_size_x-1:
+            score = -1000
+            X[grid_size_y-1, grid_size_x-1] = die_color
+        elif not xcar in road:
+            score = -1000
+            X[grid_size_y-1, xcar] = die_color
+        else:
+            score += 0.1
+            X[grid_size_y-1, xcar] = 0.2
 
-        action = yield X[np.newaxis], end
-        if end:
+        action = yield X[np.newaxis], score
+        if score < 0:
+            break
+        if score > 2:
+            score = 1000
             break
 
-        # check if this is GRID_SIZE_Y or GRID_SIZE_X
-        z = min(max(z + action, 1), GRID_SIZE_Y - 2)
+        #xcar = min(max(xcar + action, 1), grid_size_x - car_wside)
+        # action can be -1,0,1
+        xcar = xcar + action
+
+        # check if this is grid_size_y or grid_size_x
+        # move the pixel down the screen
         y += 1
 
 
@@ -58,64 +82,98 @@ def experience_replay(batch_size):
         experience = yield rsample(memory, batch_size) if batch_size <= len(memory) else None
         memory.append(experience)
 
-def create_model():
+def create_model(grid_size_x, grid_size_y):
     # Recipe of deep reinforcement learning model
+    # the sequential model is a linear stack of layers
     model = Sequential()
-    model.add(Convolution2D(16, nb_row=3, nb_col=3, input_shape=(1, GRID_SIZE_X, GRID_SIZE_Y), activation='relu'))
+    model.add(Convolution2D(16, nb_row=3, nb_col=3,
+                            input_shape=(1, grid_size_x, grid_size_y),
+                            activation='relu'))
     model.add(Convolution2D(16, nb_row=3, nb_col=3, activation='relu'))
     model.add(Flatten())
-    model.add(Dense(100, activation='relu'))
+    #model.add(Dense(grid_size_x*grid_size_y, activation='relu'))
+    model.add(Dense(1024, activation='relu'))
     model.add(Dense(3))
     model.compile(RMSprop(), 'MSE')
     return model
 
-def save_img():
-    if 'images' not in os.listdir('.'):
-        os.mkdir('images')
+def save_img(screen, frame, msg):
+    plt.title(msg)
+    plt.imshow(screen, interpolation='none')
+    plt.savefig('images/%03i.png' % frame)
+
+def save_imgs(model, grid_size_x, grid_size_y, gif_path):
+    print("Creating snapshots for gif")
+    image_path = 'images'
+    if not os.path.exists(image_path):
+        os.mkdir(image_path)
     frame = 0
-    while True:
-        screen = (yield)
-        plt.imshow(screen[0], interpolation='none')
-        plt.savefig('images/%03i.png' % frame)
+    score = 0
+    for _ in range(1):
+        g = episode(grid_size_x, grid_size_y)
+        S, this_score = next(g)
+        # save initial image, score 0
+        save_img(S[0], frame, 'init')
         frame += 1
-
-def save_imgs(model):
-    img_saver = save_img()
-    next(img_saver)
-
-    for _ in range(10):
-        g = episode()
-        S, _ = next(g)
-        img_saver.send(S)
         try:
             while True:
-                act = np.argmax(model.predict(S[np.newaxis]), axis=-1)[0] - 1
-                S, _ = g.send(act)
-                img_saver.send(S)
+                action = np.argmax(model.predict(S[np.newaxis]), axis=-1)[0] - 1
+                S, score_add = g.send(action)
+                score += score_add
+                save_img(S[0], frame, 'score: %05i' %score)
+                frame += 1
+                if abs(score_add):
+                    # this means that the game has ended put an extra frame
+                    if score_add > 0:
+                        save_img(S[0], frame, 'Win')
+                        save_img(S[0], frame, 'Win')
+                        save_img(S[0], frame, 'Win')
+                    else:
+                        save_img(S[0], frame, 'Lose')
+                        save_img(S[0], frame, 'Lose')
+                        save_img(S[0], frame, 'Lose')
+                    frame += 1
 
         except StopIteration:
             pass
+    ipath = os.path.join(image_path, '*.png')
+    cmd = "convert -delay 10 -loop 0 %s %s" %(ipath, gif_path)
+    print("Creating gif", cmd)
+    os.system(cmd)
 
-    img_saver.close()
+def save_model(epoch_num, model, losses, grid_size_x, grid_size_y, model_path):
+    pfile = os.path.join(model_path, 'epoch_%03d.pkl'%epoch_num)
+    print('Saving epoch %i, loss: %.6f ---- to: %s' % (epoch_num, losses[-1], pfile))
+    pickle.dump({"model":model,
+                 'grid_size_x':grid_size_x, 'grid_size_y':grid_size_y,
+                 'losses':losses,
+                 'epoch':epoch_num},
+                open(pfile, mode='wb'))
 
-if __name__ == '__main__':
 
-    num_epochs = 600
-    batch_size = 128
+def train_model(model, model_path, save_every, losses, epoch_start, num_epochs, grid_size_x, grid_size_y):
     epsilon = .8
     gamma = .8
+    batch_size = 128
+    # create dir for saved files if it doesnt exist
+    if not os.path.exists(model_path):
+        os.mkdir(model_path)
 
-    model = create_model()
+    print("Saving models every %s epochs to directory: %s" %(save_every, model_path))
+
     exp_replay = experience_replay(batch_size)
     # Start experience-replay coroutine
     next(exp_replay)
 
-    for i in range(num_epochs):
-        ep = episode()
-        S, won = next(ep)  # Start coroutine of single entire episode
-        loss = 0.
+    for i in range(epoch_start, num_epochs):
+        ep = episode(grid_size_x, grid_size_y)
+        # start coroutine of single entire episode
+        S, won = next(ep)
+        # initialize loss
+        loss = 0.0
         try:
             while True:
+                # create random action
                 action = np.random.randint(-1, 2)
                 if np.random.random() > epsilon:
                     # Get the index of the maximum q-value of the model.
@@ -143,13 +201,65 @@ if __name__ == '__main__':
                         inputs.append(s)
 
                     loss += model.train_on_batch(np.array(inputs), np.array(targets))
-
         except StopIteration:
             pass
 
-        if (i + 1) % 100 == 0:
-            print('Epoch %i, loss: %.6f' % (i + 1, loss))
+        losses.append(loss)
+        if i % save_every == 0:
+            if i > epoch_start:
+                save_model(i, model, losses, grid_size_x, grid_size_y, model_path)
+    save_model(i, model, losses, grid_size_x, grid_size_y, model_path)
+    return model
+
+def load_model_from_path(load_model_path):
+    print("attempting to load from: %s" %load_model_path)
+    if os.path.exists(load_model_path):
+        lp = pickle.load(open(load_model_path, mode='rb'))
+        return lp['model'], lp['losses'], lp['grid_size_x'], lp['grid_size_y'], lp['epoch']
+    else:
+        print("Error: %s does not exist" %load_model_path)
+        sys.exit()
 
 
-    save_imgs(model)
+if __name__ == '__main__':
+    grid_size_x = 20
+    grid_size_y = 20
+    parser = argparse.ArgumentParser(description='read input for model')
+    parser.add_argument('--num_epochs', type=int, default=1000)
+    parser.add_argument('--save_every', type=int, default=20)
+    parser.add_argument('--do_make_gif', action='store_true')
+    parser.add_argument('--gif_path', type=str,  default='example.gif')
+    parser.add_argument('--save_model_path', type=str,  default='models')
+    parser.add_argument('--load_model_path', type=str, default='')
+    args = parser.parse_args()
+
+    num_epochs = args.num_epochs
+    save_every = args.save_every
+    load_model_path = args.load_model_path
+    do_make_gif = args.do_make_gif
+    gif_path = args.gif_path
+    if do_make_gif:
+        print("Will save images at completion and create gif: %s" %gif_path)
+
+    if load_model_path != '':
+        # if we were given a model, continue
+        model, losses, grid_size_x, grid_size_y, epoch_start = load_model_from_path(load_model_path)
+        print("Loading model with values: epoch_start:%s loss:%s" %(epoch_start, losses[-1]))
+    else:
+        # else: create a model from scratch
+        epoch_start = 0
+        losses = []
+        model = create_model(grid_size_x, grid_size_y)
+
+    save_model_path = args.save_model_path
+    do_epochs = num_epochs-epoch_start
+    if (do_epochs-1) > 0:
+        print("Running for %s epochs" %do_epochs)
+        model = train_model(model, save_model_path, save_every, losses, epoch_start, num_epochs, grid_size_x, grid_size_y)
+    if do_make_gif:
+        save_imgs(model, grid_size_x, grid_size_y, gif_path)
+
+    plt.title("Loss")
+    plt.plot(losses)
+    plt.savefig('model_losses_%03i.png' %(len(losses)))
 
