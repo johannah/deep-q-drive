@@ -16,7 +16,7 @@ import argparse
 import pickle
 from glob import glob
 
-win_score = 1000
+win_score = 100
 
 def get_turn():
     change = np.random.randint(5, 12)
@@ -64,7 +64,7 @@ def episode(grid_size_x, grid_size_y):
     score = 0
     my_road = list(np.where(X[grid_size_y-1,:]<1)[0])
     xcar = my_road[track_side]
-
+    end = 0
     while not wrecked:
         # reset initial
         X[0,:] = 1.0
@@ -83,18 +83,15 @@ def episode(grid_size_x, grid_size_y):
         else:
             score += 1
             X[grid_size_y-1, xcar] = 0.2
+        if abs(score) ==  win_score:
+            wrecked = True
+            end = 1
         action = yield X[np.newaxis], score
-        if score < 0:
-            wrecked = True
-        if score >= win_score:
-            wrecked = True
         # action can be -1,0,1
         xcar = xcar + action
         # iterate to newest track
         X = np.roll(X, 1, axis=0)
         road, count, x, turn_by, change = update_road(count, turn_by, change, x, road)
-
-
 
 def experience_replay(batch_size):
     """
@@ -164,88 +161,96 @@ def save_imgs(model, grid_size_x, grid_size_y, gif_path):
     print("Creating gif", cmd)
     os.system(cmd)
 
-def save_model(epoch_num, model, losses, grid_size_x, grid_size_y, model_path):
+def save_model(epoch_num, model, losses, all_scores, grid_size_x, grid_size_y, model_path):
     pfile = os.path.join(model_path, 'epoch_%03d.pkl'%epoch_num)
     print('Saving epoch %i, loss: %.6f ---- to: %s' % (epoch_num, losses[-1], pfile))
     pickle.dump({"model":model,
                  'grid_size_x':grid_size_x, 'grid_size_y':grid_size_y,
                  'losses':losses,
+                 'all_scores':all_scores,
                  'epoch':epoch_num},
                 open(pfile, mode='wb'))
 
 def train_model(model, model_path, save_every, losses, epoch_start, num_epochs, grid_size_x, grid_size_y):
-    epsilon = .8
+    epsilon = 0.05
     gamma = .8
     batch_size = 128
     # create dir for saved files if it doesnt exist
     if not os.path.exists(model_path):
         os.mkdir(model_path)
-
     print("Saving models every %s epochs to directory: %s" %(save_every, model_path))
-
     exp_replay = experience_replay(batch_size)
     # Start experience-replay coroutine
     next(exp_replay)
-
+    all_scores = []
     for i in range(epoch_start, num_epochs):
         ep = episode(grid_size_x, grid_size_y)
         # start coroutine of single entire episode
-        S, won = next(ep)
+        S, score = next(ep)
         # initialize loss
         loss = 0.0
+        scores = []
         try:
             while True:
-                # create random action
-                action = np.random.randint(-1, 2)
-                if np.random.random() > epsilon:
+                if np.random.random() < epsilon:
+                    # sometimes a random action happens instead (explore)
+                    # create random action
+                    action = np.random.randint(-1, 2)
+                else:
                     # Get the index of the maximum q-value of the model.
                     # Subtract one because actions are either -1, 0, or 1
                     action = np.argmax(model.predict(S[np.newaxis]), axis=-1)[0] - 1
 
-                S_prime, won = ep.send(action)
-                experience = (S, action, won, S_prime)
-                S = S_prime
+                # get next state
+                S_prime, score = ep.send(action)
+                scores.append(score)
+                experience = (S, action, score, S_prime)
 
+                # set S for next time
+                S = S_prime
                 batch = exp_replay.send(experience)
                 if batch:
                     inputs = []
                     targets = []
                     for s, a, r, s_prime in batch:
-                        # The targets of unchosen actions are the q-values of the model,
-                        # so that the corresponding errors are 0. The targets of chosen actions
-                        # are either the rewards, in case a terminal state has been reached,
-                        # or future discounted q-values, in case episodes are still running.
+                        # 1) do a feed forward pass for current state s to get
+                        # predicted Q values for all actions
                         t = model.predict(s[np.newaxis]).flatten()
-                        t[a + 1] = r
-                        if not r:
-                            t[a + 1] = r + gamma * model.predict(s_prime[np.newaxis]).max(axis=-1)
+                        # use a+1 since actions can be -1,0,1
+                        if (0 > r) or (r >= win_score):
+                            t[a+1] = r
+
+                        else:
+                            # if we are not at an end state:
+                            t[a+1] = r + gamma * model.predict(s_prime[np.newaxis]).max(axis=-1)
+
                         targets.append(t)
                         inputs.append(s)
-
                     loss += model.train_on_batch(np.array(inputs), np.array(targets))
         except StopIteration:
             pass
-
         losses.append(loss)
+        all_scores.append(scores[-2])
+
         if i % save_every == 0:
             if i > epoch_start:
-                save_model(i, model, losses, grid_size_x, grid_size_y, model_path)
-    save_model(i, model, losses, grid_size_x, grid_size_y, model_path)
-    return model
+                save_model(i, model, losses, all_scores, grid_size_x, grid_size_y, model_path)
+    save_model(i, model, losses, all_scores, grid_size_x, grid_size_y, model_path)
+    return model, losses, all_scores
 
 def load_model_from_path(load_model_path):
     print("attempting to load from: %s" %load_model_path)
     if os.path.exists(load_model_path):
         lp = pickle.load(open(load_model_path, mode='rb'))
-        return lp['model'], lp['losses'], lp['grid_size_x'], lp['grid_size_y'], lp['epoch']
+        return lp['model'], lp['losses'], lp['all_scores'], lp['grid_size_x'], lp['grid_size_y'], lp['epoch']
     else:
         print("Error: %s does not exist" %load_model_path)
         sys.exit()
 
 
 if __name__ == '__main__':
-    grid_size_x = 40
-    grid_size_y = 40
+    grid_size_x = 20
+    grid_size_y = 20
     parser = argparse.ArgumentParser(description='read input for model')
     parser.add_argument('--num_epochs', type=int, default=1000)
     parser.add_argument('--save_every', type=int, default=20)
@@ -265,7 +270,7 @@ if __name__ == '__main__':
 
     if load_model_path != '':
         # if we were given a model, continue
-        model, losses, grid_size_x, grid_size_y, epoch_start = load_model_from_path(load_model_path)
+        model, losses, all_scores, grid_size_x, grid_size_y, epoch_start = load_model_from_path(load_model_path)
         print("Loading model with values: epoch_start:%s loss:%s" %(epoch_start, losses[-1]))
     else:
         # else: create a model from scratch
@@ -277,11 +282,25 @@ if __name__ == '__main__':
     do_epochs = num_epochs-epoch_start
     if (do_epochs-1) > 0:
         print("Running for %s epochs" %do_epochs)
-        model = train_model(model, save_model_path, save_every, losses, epoch_start, num_epochs, grid_size_x, grid_size_y)
+        model, losses, all_scores = train_model(model, save_model_path, save_every, losses, epoch_start, num_epochs, grid_size_x, grid_size_y)
+
+    plt.figure()
+    plt.title("Loss")
+    print("LOSSES", len(losses), losses)
+    losses = np.array(losses)
+    plt.plot(losses/max(losses))
+    plt.savefig('model_losses_%03i.png' %(len(losses)))
+
+
+    plt.figure()
+    plt.title("Scores")
+    all_scores = np.array(all_scores)
+    plt.plot(all_scores)
+    plt.savefig('model_scores_%03i.png' %(len(all_scores)))
+
+    plt.clf()
+    plt.figure()
+
     if do_make_gif:
         save_imgs(model, grid_size_x, grid_size_y, gif_path)
-
-    plt.title("Loss")
-    plt.plot(losses)
-    plt.savefig('model_losses_%03i.png' %(len(losses)))
 
