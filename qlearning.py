@@ -16,10 +16,10 @@ import argparse
 import pickle
 from glob import glob
 
-win_score = 100
+win_score = 1000
 
 def get_turn():
-    turn_by = np.random.randint(-2, 3)
+    turn_by = np.random.randint(-3, 4)
     if turn_by >= 1:
         turn_by = 1
     elif turn_by <= -1:
@@ -36,7 +36,8 @@ def episode(grid_size_x, grid_size_y):
     count = 0
 
     def update_road(x, road, count, turn_by):
-        if not count%3:
+        count += 1
+        if not count%4:
             turn_by = get_turn()
         if int(turn_by):
             x = x+turn_by
@@ -46,7 +47,6 @@ def episode(grid_size_x, grid_size_y):
                 turn_by = -turn_by
                 x = x+turn_by
                 road = list(range(x-track_side-1, x+track_side))
-        count += 1
         return road, x, turn_by, count
 
     # initial center for road
@@ -64,6 +64,8 @@ def episode(grid_size_x, grid_size_y):
     score = 0
     my_road = list(np.where(X[grid_size_y-1,:]<1)[0])
     xcar = my_road[track_side]
+    road = list(np.where(X[0,:]<1)[0])
+    x = road[track_side]
     end = 0
     while not wrecked:
         # reset initial
@@ -71,21 +73,21 @@ def episode(grid_size_x, grid_size_y):
         X[0,road] = 0.0
         # draw initialized car
         my_road = list(np.where(X[grid_size_y-1,:]<1)[0])
-        if xcar < 0:
-            score = lose_score
-            X[grid_size_y-1, 0] = die_color
-        elif xcar > grid_size_x-1:
-            score = lose_score
-            X[grid_size_y-1, grid_size_x-1] = die_color
-        elif xcar not in my_road:
+        if xcar not in my_road:
+            print("not in road", xcar, my_road)
             score = lose_score
             X[grid_size_y-1, xcar] = die_color
+            end = -1
         else:
+            print('score:', score, 'pos', xcar)
             score += 1
             X[grid_size_y-1, xcar] = 0.2
         if abs(score) ==  win_score:
             wrecked = True
-            end = 1
+            if score == win_score:
+                end = 1
+            print("ended game")
+        #action = yield X[np.newaxis], score
         action = yield X[np.newaxis], score
         # action can be -1,0,1
         xcar = xcar + action
@@ -108,11 +110,11 @@ def experience_replay(batch_size):
 def create_model(grid_size_x, grid_size_y):
     # the sequential model is a linear stack of layers
     model = Sequential()
-    model.add(Convolution2D(32, nb_row=3, nb_col=3,
+    model.add(Convolution2D(16, nb_row=3, nb_col=3,
                             input_shape=(1, grid_size_x, grid_size_y),
                             activation='relu'))
-    model.add(Convolution2D(32, nb_row=3, nb_col=3, activation='relu'))
-    model.add(Convolution2D(32, nb_row=3, nb_col=3, activation='relu'))
+    model.add(Convolution2D(16, nb_row=3, nb_col=3, activation='relu'))
+    model.add(Convolution2D(16, nb_row=3, nb_col=3, activation='relu'))
     model.add(Flatten())
     model.add(Dense(1024, activation='relu'))
     model.add(Dense(3))
@@ -163,7 +165,7 @@ def save_imgs(model, grid_size_x, grid_size_y, gif_path):
     os.system(cmd)
 
 def save_model(epoch_num, model, losses, all_scores, grid_size_x, grid_size_y, model_path):
-    pfile = os.path.join(model_path, 'epoch_%03d.pkl'%epoch_num)
+    pfile = os.path.join(model_path, 'epoch_%04d.pkl'%epoch_num)
     print('Saving epoch %i, loss: %.6f ---- to: %s' % (epoch_num, losses[-1], pfile))
     pickle.dump({"model":model,
                  'grid_size_x':grid_size_x, 'grid_size_y':grid_size_y,
@@ -175,7 +177,7 @@ def save_model(epoch_num, model, losses, all_scores, grid_size_x, grid_size_y, m
 def train_model(model, model_path, save_every, losses, epoch_start, num_epochs, grid_size_x, grid_size_y):
     epsilon = 0.05
     gamma = .8
-    batch_size = 128
+    batch_size = 225
     # create dir for saved files if it doesnt exist
     if not os.path.exists(model_path):
         os.mkdir(model_path)
@@ -198,14 +200,19 @@ def train_model(model, model_path, save_every, losses, epoch_start, num_epochs, 
                     # create random action
                     action = np.random.randint(-1, 2)
                 else:
-                    # Get the index of the maximum q-value of the model.
-                    # Subtract one because actions are either -1, 0, or 1
+                    # get max q-value of the model.
+                    # subtract one because actions are either -1, 0, or 1
                     action = np.argmax(model.predict(S[np.newaxis]), axis=-1)[0] - 1
 
                 # get next state
                 S_prime, score = ep.send(action)
-                score = score/float(win_score)
                 scores.append(score)
+                score = score/float(win_score)
+                #if abs(score) == win_score:
+                #    score = np.sign(score) * 1
+                #else:
+                #    score = 0.0
+                #score = score/float(win_score)
                 experience = (S, action, score, S_prime)
 
                 # set S for next time
@@ -219,7 +226,7 @@ def train_model(model, model_path, save_every, losses, epoch_start, num_epochs, 
                         # predicted Q values for all actions
                         t = model.predict(s[np.newaxis]).flatten()
                         # use a+1 since actions can be -1,0,1
-                        if (0 > r) or (r >= win_score):
+                        if abs(r) == 1.0:
                             t[a+1] = r
                         else:
                             # if we are not at an end state:
@@ -231,7 +238,7 @@ def train_model(model, model_path, save_every, losses, epoch_start, num_epochs, 
         except StopIteration:
             pass
         losses.append(loss)
-        print("epoch: %s loss: %s" %(i,loss))
+        print("epoch: %s loss: %s score: %s" %(i,loss, scores[-2]))
         all_scores.append(scores[-2])
         if i % save_every == 0:
             if i > epoch_start:
@@ -249,11 +256,11 @@ def load_model_from_path(load_model_path):
         sys.exit()
 
 if __name__ == '__main__':
-    grid_size_x = 20
-    grid_size_y = 20
+    grid_size_x = 16
+    grid_size_y = 16
     parser = argparse.ArgumentParser(description='read input for model')
     parser.add_argument('--num_epochs', type=int, default=1000)
-    parser.add_argument('--save_every', type=int, default=40)
+    parser.add_argument('--save_every', type=int, default=20)
     parser.add_argument('--do_make_gif', action='store_true')
     parser.add_argument('--gif_path', type=str,  default='example.gif')
     parser.add_argument('--save_model_path', type=str,  default='models')
@@ -289,14 +296,14 @@ if __name__ == '__main__':
     print("LOSSES", len(losses), losses)
     losses = np.array(losses)
     plt.plot(losses/max(losses))
-    plt.savefig('model_losses_%03i.png' %(len(losses)))
+    plt.savefig('model_losses_%04i.png' %(len(losses)))
 
 
     plt.figure()
     plt.title("Scores")
     all_scores = np.array(all_scores)
     plt.plot(all_scores)
-    plt.savefig('model_scores_%03i.png' %(len(all_scores)))
+    plt.savefig('model_scores_%04i.png' %(len(all_scores)))
 
     plt.clf()
     plt.figure()
