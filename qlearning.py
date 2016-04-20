@@ -14,60 +14,86 @@ from keras.optimizers import SGD, RMSprop
 from matplotlib import pyplot as plt
 import argparse
 import pickle
+from glob import glob
 
+win_score = 1000
+
+def get_turn():
+    change = np.random.randint(5, 12)
+    turn_by = np.random.randint(-1, 2)
+    return change, turn_by
 
 def episode(grid_size_x, grid_size_y):
     # always start boulder at 0
-    y = 0
     car_wside = 1
     car_length = 1
     track_side = 3
-    x = np.random.randint(track_side-1, grid_size_x-track_side)
-    x = 6
-    xcar = x
+    lose_score = -win_score
     score = 0
+    die_color = 0.75
+    wrecked = False
+    count = 0
+
+    def update_road(count, turn_by, change, x, road):
+        if count==change:
+            change, turn_by = get_turn()
+            count = 0
+        else:
+            count += 1
+
+        if int(turn_by):
+            x = x+turn_by
+            if (track_side+2)<x<((grid_size_x-2)-track_side):
+                road = list(range(x-track_side-1, x+track_side))
+            else:
+                count = change
+        return road, count, x, turn_by, change
+
+    # initial center for road
+    x = np.random.randint(track_side+2, (grid_size_x-2)-track_side)
+    road = list(range(x-track_side-1, x+track_side))
     # create track array
     X = np.ones((grid_size_x, grid_size_y))
-    road = list(range(x-track_side-1, x+track_side))
-    X[0:grid_size_y,road] = 0.0
+    change, turn_by = get_turn()
 
-    die_color = 0.75
-    while True:
+    for yv in range(grid_size_y)[::-1]:
+        road, count, x, turn_by, change = update_road(count, turn_by, change, x, road)
+        X[yv, road] = 0.0
 
-        # iterate to newest track
-        X = np.roll(X, 1, axis=0)
-        road = list(range(x-track_side-1, x+track_side))
+    # start car in the center of the road
+    score = 0
+    my_road = list(np.where(X[grid_size_y-1,:]<1)[0])
+    xcar = my_road[track_side]
+
+    while not wrecked:
         # reset initial
         X[0,:] = 1.0
         X[0,road] = 0.0
         # draw initialized car
+        my_road = list(np.where(X[grid_size_y-1,:]<1)[0])
         if xcar < 0:
-            score = -1000
+            score = lose_score
             X[grid_size_y-1, 0] = die_color
         elif xcar > grid_size_x-1:
-            score = -1000
+            score = lose_score
             X[grid_size_y-1, grid_size_x-1] = die_color
-        elif not xcar in road:
-            score = -1000
+        elif xcar not in my_road:
+            score = lose_score
             X[grid_size_y-1, xcar] = die_color
         else:
-            score += 0.1
+            score += 1
             X[grid_size_y-1, xcar] = 0.2
-
         action = yield X[np.newaxis], score
         if score < 0:
-            break
-        if score > 2:
-            score = 1000
-            break
-
-        #xcar = min(max(xcar + action, 1), grid_size_x - car_wside)
+            wrecked = True
+        if score >= win_score:
+            wrecked = True
         # action can be -1,0,1
         xcar = xcar + action
+        # iterate to newest track
+        X = np.roll(X, 1, axis=0)
+        road, count, x, turn_by, change = update_road(count, turn_by, change, x, road)
 
-        # check if this is grid_size_y or grid_size_x
-        # move the pixel down the screen
-        y += 1
 
 
 def experience_replay(batch_size):
@@ -83,7 +109,6 @@ def experience_replay(batch_size):
         memory.append(experience)
 
 def create_model(grid_size_x, grid_size_y):
-    # Recipe of deep reinforcement learning model
     # the sequential model is a linear stack of layers
     model = Sequential()
     model.add(Convolution2D(16, nb_row=3, nb_col=3,
@@ -91,8 +116,7 @@ def create_model(grid_size_x, grid_size_y):
                             activation='relu'))
     model.add(Convolution2D(16, nb_row=3, nb_col=3, activation='relu'))
     model.add(Flatten())
-    #model.add(Dense(grid_size_x*grid_size_y, activation='relu'))
-    model.add(Dense(1024, activation='relu'))
+    model.add(Dense(grid_size_x*grid_size_y, activation='relu'))
     model.add(Dense(3))
     model.compile(RMSprop(), 'MSE')
     return model
@@ -107,33 +131,32 @@ def save_imgs(model, grid_size_x, grid_size_y, gif_path):
     image_path = 'images'
     if not os.path.exists(image_path):
         os.mkdir(image_path)
+    else:
+        todel = glob(os.path.join(image_path, '*.png'))
+        for f in todel:
+            os.remove(f)
     frame = 0
     score = 0
-    for _ in range(1):
+    for _ in range(5):
         g = episode(grid_size_x, grid_size_y)
         S, this_score = next(g)
         # save initial image, score 0
-        save_img(S[0], frame, 'init')
+        save_img(S[0], frame, 'score: %05i' %score)
         frame += 1
         try:
             while True:
                 action = np.argmax(model.predict(S[np.newaxis]), axis=-1)[0] - 1
-                S, score_add = g.send(action)
-                score += score_add
+                S, score = g.send(action)
+                print(score, action)
                 save_img(S[0], frame, 'score: %05i' %score)
                 frame += 1
-                if abs(score_add):
-                    # this means that the game has ended put an extra frame
-                    if score_add > 0:
-                        save_img(S[0], frame, 'Win')
-                        save_img(S[0], frame, 'Win')
-                        save_img(S[0], frame, 'Win')
-                    else:
-                        save_img(S[0], frame, 'Lose')
-                        save_img(S[0], frame, 'Lose')
-                        save_img(S[0], frame, 'Lose')
+                if (score < 0) or (score > win_score):
+                    save_img(S[0], frame, 'score: %05i' %score)
                     frame += 1
-
+                    save_img(S[0], frame, 'score: %05i' %score)
+                    frame += 1
+                    save_img(S[0], frame, 'score: %05i' %score)
+                    frame += 1
         except StopIteration:
             pass
     ipath = os.path.join(image_path, '*.png')
@@ -149,7 +172,6 @@ def save_model(epoch_num, model, losses, grid_size_x, grid_size_y, model_path):
                  'losses':losses,
                  'epoch':epoch_num},
                 open(pfile, mode='wb'))
-
 
 def train_model(model, model_path, save_every, losses, epoch_start, num_epochs, grid_size_x, grid_size_y):
     epsilon = .8
@@ -222,8 +244,8 @@ def load_model_from_path(load_model_path):
 
 
 if __name__ == '__main__':
-    grid_size_x = 20
-    grid_size_y = 20
+    grid_size_x = 40
+    grid_size_y = 40
     parser = argparse.ArgumentParser(description='read input for model')
     parser.add_argument('--num_epochs', type=int, default=1000)
     parser.add_argument('--save_every', type=int, default=20)
