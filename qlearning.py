@@ -19,14 +19,15 @@ from glob import glob
 win_score = 100
 
 def get_turn():
-    change = np.random.randint(3, 5)
-    turn_by = np.random.randint(-1, 2)
-    return change, turn_by
+    turn_by = np.random.randint(-2, 3)
+    if turn_by >= 1:
+        turn_by = 1
+    elif turn_by <= -1:
+        turn_by = -1
+    return turn_by
 
 def episode(grid_size_x, grid_size_y):
     # always start boulder at 0
-    car_wside = 1
-    car_length = 1
     track_side = 3
     lose_score = -win_score
     score = 0
@@ -34,30 +35,29 @@ def episode(grid_size_x, grid_size_y):
     wrecked = False
     count = 0
 
-    def update_road(count, turn_by, change, x, road):
-        if count==change:
-            change, turn_by = get_turn()
-            count = 0
-        else:
-            count += 1
-
+    def update_road(x, road, count, turn_by):
+        if not count%3:
+            turn_by = get_turn()
         if int(turn_by):
             x = x+turn_by
-            if (track_side+2)<x<((grid_size_x-2)-track_side):
+            if (track_side+1)<x<((grid_size_x-1)-track_side):
                 road = list(range(x-track_side-1, x+track_side))
             else:
-                count = change
-        return road, count, x, turn_by, change
+                turn_by = -turn_by
+                x = x+turn_by
+                road = list(range(x-track_side-1, x+track_side))
+        count += 1
+        return road, x, turn_by, count
 
     # initial center for road
     x = np.random.randint(track_side+2, (grid_size_x-2)-track_side)
     road = list(range(x-track_side-1, x+track_side))
     # create track array
     X = np.ones((grid_size_x, grid_size_y))
-    change, turn_by = get_turn()
 
+    turn_by = get_turn()
     for yv in range(grid_size_y)[::-1]:
-        road, count, x, turn_by, change = update_road(count, turn_by, change, x, road)
+        road, x, turn_by, count = update_road(x, road, count, turn_by)
         X[yv, road] = 0.0
 
     # start car in the center of the road
@@ -91,7 +91,7 @@ def episode(grid_size_x, grid_size_y):
         xcar = xcar + action
         # iterate to newest track
         X = np.roll(X, 1, axis=0)
-        road, count, x, turn_by, change = update_road(count, turn_by, change, x, road)
+        road, x, turn_by, count = update_road(x, road, count, turn_by)
 
 def experience_replay(batch_size):
     """
@@ -135,7 +135,7 @@ def save_imgs(model, grid_size_x, grid_size_y, gif_path):
             os.remove(f)
     frame = 0
     score = 0
-    for _ in range(5):
+    for _ in range(3):
         g = episode(grid_size_x, grid_size_y)
         S, this_score = next(g)
         # save initial image, score 0
@@ -145,7 +145,7 @@ def save_imgs(model, grid_size_x, grid_size_y, gif_path):
             while True:
                 action = np.argmax(model.predict(S[np.newaxis]), axis=-1)[0] - 1
                 S, score = g.send(action)
-                print(score, action)
+                print('score:%s action:%s' %(score, action))
                 save_img(S[0], frame, 'score: %05i' %score)
                 frame += 1
                 if (score < 0) or (score > win_score):
@@ -249,11 +249,11 @@ def load_model_from_path(load_model_path):
         sys.exit()
 
 if __name__ == '__main__':
-    grid_size_x = 15
-    grid_size_y = 15
+    grid_size_x = 20
+    grid_size_y = 20
     parser = argparse.ArgumentParser(description='read input for model')
     parser.add_argument('--num_epochs', type=int, default=1000)
-    parser.add_argument('--save_every', type=int, default=20)
+    parser.add_argument('--save_every', type=int, default=40)
     parser.add_argument('--do_make_gif', action='store_true')
     parser.add_argument('--gif_path', type=str,  default='example.gif')
     parser.add_argument('--save_model_path', type=str,  default='models')
