@@ -19,7 +19,7 @@ from glob import glob
 win_score = 100
 
 def get_turn():
-    change = np.random.randint(5, 12)
+    change = np.random.randint(3, 5)
     turn_by = np.random.randint(-1, 2)
     return change, turn_by
 
@@ -108,12 +108,13 @@ def experience_replay(batch_size):
 def create_model(grid_size_x, grid_size_y):
     # the sequential model is a linear stack of layers
     model = Sequential()
-    model.add(Convolution2D(16, nb_row=3, nb_col=3,
+    model.add(Convolution2D(32, nb_row=3, nb_col=3,
                             input_shape=(1, grid_size_x, grid_size_y),
                             activation='relu'))
-    model.add(Convolution2D(16, nb_row=3, nb_col=3, activation='relu'))
+    model.add(Convolution2D(32, nb_row=3, nb_col=3, activation='relu'))
+    model.add(Convolution2D(32, nb_row=3, nb_col=3, activation='relu'))
     model.add(Flatten())
-    model.add(Dense(grid_size_x*grid_size_y, activation='relu'))
+    model.add(Dense(1024, activation='relu'))
     model.add(Dense(3))
     model.compile(RMSprop(), 'MSE')
     return model
@@ -203,6 +204,7 @@ def train_model(model, model_path, save_every, losses, epoch_start, num_epochs, 
 
                 # get next state
                 S_prime, score = ep.send(action)
+                score = score/float(win_score)
                 scores.append(score)
                 experience = (S, action, score, S_prime)
 
@@ -219,7 +221,6 @@ def train_model(model, model_path, save_every, losses, epoch_start, num_epochs, 
                         # use a+1 since actions can be -1,0,1
                         if (0 > r) or (r >= win_score):
                             t[a+1] = r
-
                         else:
                             # if we are not at an end state:
                             t[a+1] = r + gamma * model.predict(s_prime[np.newaxis]).max(axis=-1)
@@ -230,8 +231,8 @@ def train_model(model, model_path, save_every, losses, epoch_start, num_epochs, 
         except StopIteration:
             pass
         losses.append(loss)
+        print("epoch: %s loss: %s" %(i,loss))
         all_scores.append(scores[-2])
-
         if i % save_every == 0:
             if i > epoch_start:
                 save_model(i, model, losses, all_scores, grid_size_x, grid_size_y, model_path)
@@ -247,10 +248,9 @@ def load_model_from_path(load_model_path):
         print("Error: %s does not exist" %load_model_path)
         sys.exit()
 
-
 if __name__ == '__main__':
-    grid_size_x = 20
-    grid_size_y = 20
+    grid_size_x = 15
+    grid_size_y = 15
     parser = argparse.ArgumentParser(description='read input for model')
     parser.add_argument('--num_epochs', type=int, default=1000)
     parser.add_argument('--save_every', type=int, default=20)
