@@ -1,4 +1,4 @@
-# based off code from bitwise-ben/Fruit
+# based off code from http://github.com/bitwise-ben/Fruit
 import os
 from random import sample as rsample
 
@@ -73,6 +73,7 @@ def episode(grid_size_x, grid_size_y):
         X[0,road] = 0.0
         # draw initialized car
         my_road = list(np.where(X[grid_size_y-1,:]<1)[0])
+        print(xcar, my_road)
         if xcar not in my_road:
             print("not in road", xcar, my_road)
             score = lose_score
@@ -115,9 +116,13 @@ def create_model(grid_size_x, grid_size_y):
                             activation='relu'))
     model.add(Convolution2D(16, nb_row=3, nb_col=3, activation='relu'))
     model.add(Convolution2D(16, nb_row=3, nb_col=3, activation='relu'))
+    # flatten so this will work with dense layer
     model.add(Flatten())
+    # adding capacity
     model.add(Dense(1024, activation='relu'))
+    # output predicted Q-value with each action
     model.add(Dense(3))
+    # optimization algorithm
     model.compile(RMSprop(), 'MSE')
     return model
 
@@ -128,6 +133,9 @@ def save_img(screen, frame, msg):
 
 def save_imgs(model, grid_size_x, grid_size_y, gif_path):
     print("Creating snapshots for gif")
+    ipath = os.path.join(image_path, '*.png')
+    cmd = "convert -delay 10 -loop 0 %s %s" %(ipath, gif_path)
+    print("will run cmd", cmd)
     image_path = 'images'
     if not os.path.exists(image_path):
         os.mkdir(image_path)
@@ -145,6 +153,8 @@ def save_imgs(model, grid_size_x, grid_size_y, gif_path):
         frame += 1
         try:
             while True:
+                # subtract one since actions are stored one off to keep
+                # everything positive
                 action = np.argmax(model.predict(S[np.newaxis]), axis=-1)[0] - 1
                 S, score = g.send(action)
                 print('score:%s action:%s' %(score, action))
@@ -159,9 +169,7 @@ def save_imgs(model, grid_size_x, grid_size_y, gif_path):
                     frame += 1
         except StopIteration:
             pass
-    ipath = os.path.join(image_path, '*.png')
-    cmd = "convert -delay 10 -loop 0 %s %s" %(ipath, gif_path)
-    print("Creating gif", cmd)
+    print("running", cmd)
     os.system(cmd)
 
 def save_model(epoch_num, model, losses, all_scores, grid_size_x, grid_size_y, model_path):
@@ -200,23 +208,21 @@ def train_model(model, model_path, save_every, losses, epoch_start, num_epochs, 
                     # create random action
                     action = np.random.randint(-1, 2)
                 else:
-                    # get max q-value of the model.
+                    # get max q-value of the model given input image
                     # subtract one because actions are either -1, 0, or 1
                     action = np.argmax(model.predict(S[np.newaxis]), axis=-1)[0] - 1
 
-                # get next state
+                # send the action to our episode to determine the new state and
+                # our new score
                 S_prime, score = ep.send(action)
+                # keep account of score
                 scores.append(score)
                 score = score/float(win_score)
-                #if abs(score) == win_score:
-                #    score = np.sign(score) * 1
-                #else:
-                #    score = 0.0
-                #score = score/float(win_score)
                 experience = (S, action, score, S_prime)
-
                 # set S for next time
                 S = S_prime
+                # send our account of this step to replay center and receive
+                # back a batch of past experiences to train on
                 batch = exp_replay.send(experience)
                 if batch:
                     inputs = []
@@ -225,15 +231,20 @@ def train_model(model, model_path, save_every, losses, epoch_start, num_epochs, 
                         # 1) do a feed forward pass for current state s to get
                         # predicted Q values for all actions
                         t = model.predict(s[np.newaxis]).flatten()
-                        # use a+1 since actions can be -1,0,1
+                        # the game is over when abs(r) is 1
                         if abs(r) == 1.0:
+                        # use a+1 since actions can be -1,0,1
+                        # only correct for actions that we did take because we
+                        # dont know what could have happened if another action
+                        # was taken
                             t[a+1] = r
                         else:
-                            # if we are not at an end state:
+                            # we are not at an end state, add future discounted
+                            # award to future value
                             t[a+1] = r + gamma * model.predict(s_prime[np.newaxis]).max(axis=-1)
-
                         targets.append(t)
                         inputs.append(s)
+                    # train on this batch set
                     loss += model.train_on_batch(np.array(inputs), np.array(targets))
         except StopIteration:
             pass
